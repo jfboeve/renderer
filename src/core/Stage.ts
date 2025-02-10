@@ -452,12 +452,19 @@ export class Stage {
     }
   }
 
-  addQuads(node: CoreNode) {
-    assertTruthy(this.renderer);
+  addQuads(node: CoreNode, rttActive = false, rttParent?: CoreNode) {
+    if (node.parentHasRenderTexture === true) {
+      if (rttActive === false) {
+        return;
+      }
+      if (node.rttParent!.id !== rttParent!.id) {
+        return;
+      }
+    }
 
     // If the node is renderable and has a loaded texture, render it
     if (node.isRenderable === true) {
-      node.renderQuads(this.renderer);
+      node.renderQuads(this.renderer, rttActive, rttParent);
     }
 
     for (let i = 0; i < node.children.length; i++) {

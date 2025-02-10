@@ -56,6 +56,7 @@ import type { IAnimationController } from '../common/IAnimationController.js';
 import { CoreAnimation } from './animations/CoreAnimation.js';
 import { CoreAnimationController } from './animations/CoreAnimationController.js';
 import type { CoreShaderNode } from './renderers/CoreShaderNode.js';
+import { CoreTexturizer } from './CoreTexturizer.js';
 
 export enum CoreNodeRenderState {
   Init = 0,
@@ -726,7 +727,6 @@ export class CoreNode extends EventEmitter {
 
   public updateType = UpdateType.All;
   public childUpdateType = UpdateType.None;
-
   public globalTransform?: Matrix3d;
   public scaleRotateTransform?: Matrix3d;
   public localTransform?: Matrix3d;
@@ -750,9 +750,13 @@ export class CoreNode extends EventEmitter {
   public premultipliedColorBl = 0;
   public premultipliedColorBr = 0;
   public calcZIndex = 0;
-  public hasRTTupdates = false;
   public parentHasRenderTexture = false;
+
+  hasRTTupdates = false;
+  public texturizer: CoreTexturizer | null = null;
   public rttParent: CoreNode | null = null;
+  public rttRequested = false;
+  public rttTexture: Texture | null = null;
 
   constructor(readonly stage: Stage, props: CoreNodeProps) {
     super();
@@ -822,8 +826,8 @@ export class CoreNode extends EventEmitter {
       // Render RTT nodes. So we only need to listen fo changes and
       // no need to check the texture.state until we restructure how
       // textures are being processed.
-      if (this.parentHasRenderTexture) {
-        this.notifyParentRTTOfUpdate();
+      if (this.parentHasRenderTexture === true || this.rtt === true) {
+        this.requestRTT();
         return;
       }
 
@@ -864,8 +868,8 @@ export class CoreNode extends EventEmitter {
     this.stage.requestRender();
 
     // If parent has a render texture, flag that we need to update
-    if (this.parentHasRenderTexture) {
-      this.notifyParentRTTOfUpdate();
+    if (this.parentHasRenderTexture === true || this.rtt === true) {
+      this.requestRTT();
     }
 
     // ignore 1x1 pixel textures
@@ -886,8 +890,8 @@ export class CoreNode extends EventEmitter {
     this.setUpdateType(UpdateType.IsRenderable);
 
     // If parent has a render texture, flag that we need to update
-    if (this.parentHasRenderTexture) {
-      this.notifyParentRTTOfUpdate();
+    if (this.parentHasRenderTexture === true || this.rtt === true) {
+      this.requestRTT();
     }
 
     this.emit('failed', {
@@ -900,8 +904,8 @@ export class CoreNode extends EventEmitter {
     this.setUpdateType(UpdateType.IsRenderable);
 
     // If parent has a render texture, flag that we need to update
-    if (this.parentHasRenderTexture) {
-      this.notifyParentRTTOfUpdate();
+    if (this.parentHasRenderTexture === true || this.rtt === true) {
+      this.requestRTT();
     }
 
     this.emit('freed', {
@@ -1042,10 +1046,12 @@ export class CoreNode extends EventEmitter {
     if (this.updateType & UpdateType.Global) {
       assertTruthy(this.localTransform);
 
-      this.globalTransform = Matrix3d.copy(
+      /*this.globalTransform = Matrix3d.copy(
         parent?.globalTransform || this.localTransform,
         this.globalTransform,
       );
+
+
 
       if (this.parentHasRenderTexture && this.props.parent?.rtt) {
         this.globalTransform = Matrix3d.identity();
@@ -1053,10 +1059,40 @@ export class CoreNode extends EventEmitter {
 
       if (parent) {
         this.globalTransform.multiply(this.localTransform);
+      }*/
+      let transform = Matrix3d.copy(
+        parent?.globalTransform || this.localTransform,
+        this.globalTransform,
+      );
+
+      if (parent) {
+        transform.multiply(this.localTransform);
       }
 
-      this.calculateRenderCoords();
-      this.updateBoundingRect();
+      if (this.rtt === true) {
+        this.texturizer!.rttTransform = Matrix3d.copy(
+          transform,
+          this.texturizer!.rttTransform,
+        );
+        this.texturizer!.rttCoords = this.calculateRenderCoords(
+          transform,
+          this.texturizer!.rttCoords,
+        );
+        this.updateBoundingRect(this.texturizer!.rttCoords, transform);
+
+        this.renderCoords = this.calculateRenderCoords(
+          this.localTransform,
+          this.renderCoords,
+        );
+        this.globalTransform = Matrix3d.identity();
+      } else {
+        this.globalTransform = transform;
+        this.renderCoords = this.calculateRenderCoords(
+          transform,
+          this.renderCoords,
+        );
+        this.updateBoundingRect(this.renderCoords, transform);
+      }
 
       this.setUpdateType(
         UpdateType.RenderState |
@@ -1201,8 +1237,11 @@ export class CoreNode extends EventEmitter {
     // If the node has an RTT parent and requires a texture re-render, inform the RTT parent
     // if (this.parentHasRenderTexture && this.updateType & UpdateType.RenderTexture) {
     // @TODO have a more scoped down updateType for RTT updates
-    if (this.parentHasRenderTexture && this.updateType > 0) {
-      this.notifyParentRTTOfUpdate();
+    if (
+      (this.parentHasRenderTexture === true || this.rtt === true) &&
+      this.updateType > 0
+    ) {
+      this.requestRTT();
     }
 
     // Sorting children MUST happen after children have been updated so
@@ -1253,6 +1292,29 @@ export class CoreNode extends EventEmitter {
     }
   }
 
+  updateRTTInheritance(node: CoreNode | null) {
+    this.parentHasRenderTexture = node !== null;
+    this.rttParent = node;
+
+    if (this.rtt) {
+      return;
+    }
+    const l = this.children.length;
+    for (let i = 0; i < l; i++) {
+      this.children[i]!.updateRTTInheritance(node);
+    }
+  }
+
+  requestRTT() {
+    if (this.rtt === true) {
+      this.rttRequested = true;
+      this.setUpdateType(UpdateType.RenderTexture);
+    }
+    if (this.rttParent !== null) {
+      this.rttParent.requestRTT();
+    }
+  }
+
   checkRenderBounds(): CoreNodeRenderState {
     assertTruthy(this.renderBound);
     assertTruthy(this.strictBound);
@@ -1287,11 +1349,7 @@ export class CoreNode extends EventEmitter {
     return CoreNodeRenderState.OutOfBounds;
   }
 
-  updateBoundingRect() {
-    const { renderCoords, globalTransform: transform } = this;
-    assertTruthy(transform);
-    assertTruthy(renderCoords);
-
+  updateBoundingRect(renderCoords: RenderCoords, transform: Matrix3d) {
     const { tb, tc } = transform;
     const { x1, y1, x3, y3 } = renderCoords;
     if (tb === 0 || tc === 0) {
@@ -1391,6 +1449,7 @@ export class CoreNode extends EventEmitter {
     // If the node is out of bounds or has an alpha of 0, it is not renderable
     if (this.checkBasicRenderability() === false) {
       this.updateTextureOwnership(false);
+      this.isRenderable = false;
       this.setRenderable(false);
       return;
     }
@@ -1478,17 +1537,17 @@ export class CoreNode extends EventEmitter {
     return this.props.shader !== null;
   }
 
-  calculateRenderCoords() {
-    const { width, height, globalTransform: transform } = this;
-    assertTruthy(transform);
+  calculateRenderCoords(transform: Matrix3d, renderCoords?: RenderCoords) {
+    const { width, height } = this;
     const { tx, ty, ta, tb, tc, td } = transform;
+
     if (tb === 0 && tc === 0) {
       const minX = tx;
       const maxX = tx + width * ta;
 
       const minY = ty;
       const maxY = ty + height * td;
-      this.renderCoords = RenderCoords.translate(
+      return RenderCoords.translate(
         //top-left
         minX,
         minY,
@@ -1501,10 +1560,10 @@ export class CoreNode extends EventEmitter {
         //bottom-left
         minX,
         maxY,
-        this.renderCoords,
+        renderCoords,
       );
     } else {
-      this.renderCoords = RenderCoords.translate(
+      return RenderCoords.translate(
         //top-left
         tx,
         ty,
@@ -1517,7 +1576,7 @@ export class CoreNode extends EventEmitter {
         //bottom-left
         tx + height * tb,
         ty + height * td,
-        this.renderCoords,
+        renderCoords,
       );
     }
   }
@@ -1603,21 +1662,44 @@ export class CoreNode extends EventEmitter {
     this.removeAllListeners();
   }
 
-  renderQuads(renderer: CoreRenderer): void {
-    // Prevent quad rendering if parent has a render texture
-    // and renderer is not currently rendering to a texture
-    if (this.parentHasRenderTexture) {
-      if (!renderer.renderToTextureActive) {
-        return;
-      }
-      // Prevent quad rendering if parent render texture is not the active render texture
-      if (this.parentRenderTexture !== renderer.activeRttNode) {
-        return;
-      }
+  renderQuads(
+    renderer: CoreRenderer,
+    rttActive = false,
+    rttParent?: CoreNode,
+  ): void {
+    // // Prevent quad rendering if parent has a render texture
+    // // and renderer is not currently rendering to a texture
+    // if (this.parentHasRenderTexture) {
+    //   if (!renderer.renderToTextureActive) {
+    //     return;
+    //   }
+    //   // Prevent quad rendering if parent render texture is not the active render texture
+    //   if (this.parentRenderTexture !== renderer.activeRttNode) {
+    //     return;
+    //   }
+    // }
+
+    // assertTruthy(this.globalTransform);
+    // assertTruthy(this.renderCoords);
+
+    let transform = this.globalTransform!;
+    let renderCoords = this.renderCoords!;
+    let texture = this.texture;
+    let isRttNode = rttActive === true && this.rtt === true;
+    let shader = this.shader;
+
+    if (isRttNode === true && rttParent!.id === this.id) {
+      transform = this.texturizer!.rttTransform!;
+      renderCoords = this.texturizer!.rttCoords!;
+      shader = this.stage.defShaderNode;
     }
 
-    assertTruthy(this.globalTransform);
-    assertTruthy(this.renderCoords);
+    if (
+      (this.rtt === true && rttActive === false) ||
+      (isRttNode === true && rttParent!.id !== this.id)
+    ) {
+      texture = this.texturizer!.renderTexture;
+    }
 
     // add to list of renderables to be sorted before rendering
     renderer.addQuad({
@@ -1629,19 +1711,19 @@ export class CoreNode extends EventEmitter {
       colorBr: this.premultipliedColorBr,
       // if we do not have a texture, use the default texture
       // this assumes any renderable node is either a distinct texture or a ColorTexture
-      texture: this.texture || this.stage.defaultTexture,
+      texture: texture || this.stage.defaultTexture,
       textureOptions: this.textureOptions,
       zIndex: this.zIndex,
-      shader: this.props.shader as CoreShaderNode<any>,
+      shader,
       alpha: this.worldAlpha,
       clippingRect: this.clippingRect,
-      tx: this.globalTransform.tx,
-      ty: this.globalTransform.ty,
-      ta: this.globalTransform.ta,
-      tb: this.globalTransform.tb,
-      tc: this.globalTransform.tc,
-      td: this.globalTransform.td,
-      renderCoords: this.renderCoords,
+      tx: transform.tx,
+      ty: transform.ty,
+      ta: transform.ta,
+      tb: transform.tb,
+      tc: transform.tc,
+      td: transform.td,
+      renderCoords,
       rtt: this.rtt,
       parentHasRenderTexture: this.parentHasRenderTexture,
       framebufferDimensions: this.framebufferDimensions,
@@ -2049,8 +2131,10 @@ export class CoreNode extends EventEmitter {
       );
 
       // If the new parent has an RTT enabled, apply RTT inheritance
-      if (newParent.rtt || newParent.parentHasRenderTexture) {
-        this.applyRTTInheritance(newParent);
+      if (newParent.parentHasRenderTexture === true) {
+        this.updateRTTInheritance(newParent.rttParent!);
+      } else if (newParent.rtt === true) {
+        this.updateRTTInheritance(newParent);
       }
     }
     this.updateScaleRotateTransform();
@@ -2084,6 +2168,19 @@ export class CoreNode extends EventEmitter {
     this.props.rtt = value;
 
     if (value === true) {
+      if (this.texturizer === null) {
+        this.texturizer = new CoreTexturizer(this);
+      }
+      this.texturizer.initRTT();
+      this.texturizer.loadRenderTexture();
+    }
+
+    this.setUpdateType(UpdateType.RenderTexture);
+
+    if (value === true) {
+      this.requestRTT();
+    }
+    /*if (value === true) {
       this.initRenderTexture();
       this.markChildrenWithRTT();
     } else {
@@ -2091,13 +2188,13 @@ export class CoreNode extends EventEmitter {
     }
 
     this.setUpdateType(UpdateType.RenderTexture);
-
     if (this.parentHasRenderTexture === true) {
       this.notifyParentRTTOfUpdate();
-    }
+    }*/
   }
+
   private initRenderTexture() {
-    this.texture = this.stage.txManager.createTexture('RenderTexture', {
+    this.rttTexture = this.stage.txManager.createTexture('RenderTexture', {
       width: this.width,
       height: this.height,
     });
@@ -2129,8 +2226,8 @@ export class CoreNode extends EventEmitter {
     this.clearRTTInheritance();
 
     this.stage.renderer?.removeRTTNode(this);
-    this.hasRTTupdates = false;
-    this.texture = null;
+    this.rttRequested = false;
+    this.rttTexture = null;
   }
 
   private markChildrenWithRTT(node: CoreNode | null = null) {
@@ -2145,29 +2242,19 @@ export class CoreNode extends EventEmitter {
 
   // Apply RTT inheritance when a node has an RTT-enabled parent
   private applyRTTInheritance(parent: CoreNode) {
-    if (parent.rtt) {
-      // Only the RTT node should be added to `renderToTexture`
-      parent.setUpdateType(UpdateType.RenderTexture);
+    const l = this.children.length;
+    for (let i = 0; i < l; i++) {
+      this.children[i]!.updateRTTInheritance(null);
     }
-
-    // Propagate `parentHasRenderTexture` downwards
-    this.markChildrenWithRTT(parent);
   }
 
   // Clear RTT inheritance when detaching from an RTT chain
   private clearRTTInheritance() {
     // if this node is RTT itself stop the propagation important for nested RTT nodes
     // for the initial RTT node this is already handled in `set rtt`
-    if (this.rtt) {
-      return;
-    }
-
-    for (const child of this.children) {
-      // force child to update everything as the RTT inheritance has changed
-      child.parentHasRenderTexture = false;
-      child.rttParent = null;
-      child.setUpdateType(UpdateType.All);
-      child.clearRTTInheritance();
+    const l = this.children.length;
+    for (let i = 0; i < l; i++) {
+      this.children[i]!.updateRTTInheritance(null);
     }
   }
 

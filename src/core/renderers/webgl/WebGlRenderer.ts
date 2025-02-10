@@ -95,6 +95,9 @@ export class WebGlRenderer extends CoreRenderer {
    */
   public renderToTextureActive = false;
 
+  rttActive = false;
+  rttActiveNodeId: number | null = null;
+
   constructor(options: WebGlRendererOptions) {
     super(options);
 
@@ -320,7 +323,7 @@ export class WebGlRenderer extends CoreRenderer {
     }
 
     const ctxTexture = texture.ctxTexture as WebGlCtxTexture;
-    assertTruthy(ctxTexture instanceof WebGlCtxTexture);
+    // assertTruthy(ctxTexture instanceof WebGlCtxTexture);
     const textureIdx = this.addTexture(ctxTexture, bufferIdx);
 
     assertTruthy(this.curRenderOp !== null);
@@ -583,46 +586,44 @@ export class WebGlRenderer extends CoreRenderer {
     const { glw } = this;
     // Render all associated RTT nodes to their textures
     for (let i = 0; i < this.rttNodes.length; i++) {
-      const node = this.rttNodes[i];
+      const node = this.rttNodes[i]!;
+      const texturizer = node.texturizer!;
 
       // Skip nodes that don't have RTT updates
-      if (!node || !node.hasRTTupdates) {
+      if (texturizer.rttRequested === false) {
         continue;
       }
 
-      if (!node.texture || !node.texture.ctxTexture) {
+      const texture = texturizer.renderTexture;
+
+      if (texture === null || texture.ctxTexture === undefined) {
         console.warn('Texture not loaded for RTT node', node);
         continue;
       }
 
-      // Set the active RTT node to the current node
-      // So we can prevent rendering children of nested RTT nodes
-      this.activeRttNode = node;
-
-      assertTruthy(node.texture !== null, 'RTT node missing texture');
-      const ctxTexture = node.texture.ctxTexture;
-      assertTruthy(ctxTexture instanceof WebGlCtxRenderTexture);
-      this.renderToTextureActive = true;
+      const ctxTexture = texture.ctxTexture as WebGlCtxRenderTexture;
+      this.rttActive = true;
 
       // Bind the the texture's framebuffer
       glw.bindFramebuffer(ctxTexture.framebuffer);
-
       glw.viewport(0, 0, ctxTexture.w, ctxTexture.h);
       // Set the clear color to transparent
       glw.clearColor(0, 0, 0, 0);
       glw.clear();
 
-      // Render all associated quads to the texture
-      for (let i = 0; i < node.children.length; i++) {
-        const child = node.children[i];
+      this.stage.addQuads(node, true, node);
 
-        if (!child) {
-          continue;
-        }
+      // // Render all associated quads to the texture
+      // for (let i = 0; i < node.children.length; i++) {
+      //   const child = node.children[i];
 
-        this.stage.addQuads(child);
-        child.hasRTTupdates = false;
-      }
+      //   if (!child) {
+      //     continue;
+      //   }
+
+      //   this.stage.addQuads(child);
+      //   child.hasRTTupdates = false;
+      // }
 
       // Render all associated quads to the texture
       this.render();
